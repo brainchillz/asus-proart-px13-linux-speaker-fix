@@ -1,0 +1,20 @@
+[Unit]
+Description=PX13 audio fix after resume (reset AMD ACP/SoundWire, refresh PipeWire)
+# Run AFTER the system has fully resumed AND thawed user.slice. The reset
+# (PCI unbind/bind of the ACP) HANGS if attempted from inside the
+# systemd-sleep "post" hook (it runs while the device PM/bus is still in the
+# broken just-resumed state and user.slice is frozen - the unbind blocks for
+# ~90s and gets killed, leaving the card gone). Ordering after the sleep
+# targets means this runs once the resume is complete and the session is
+# thawed, where the reset works reliably.
+After=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+
+[Service]
+Type=oneshot
+# Small settle delay so the just-resumed ACP device PM has finished before
+# we unbind/bind it.
+ExecStartPre=/bin/sleep 3
+ExecStart=/usr/local/sbin/px13-audio-fix.sh
+
+[Install]
+WantedBy=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target

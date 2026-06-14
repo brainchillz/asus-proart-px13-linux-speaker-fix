@@ -1,0 +1,12 @@
+[Unit]
+Description=PX13 TAS2783 SoundWire amp rebind + PipeWire refresh (boot)
+After=sound.target
+Wants=sound.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/px13-audio-fix.sh
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,8 @@
+# Proprietary TAS2783 calibration firmware — extract locally, DO NOT commit.
+# See firmware/EXTRACT-FIRMWARE.md
+firmware/*.bin
+
+# Local Claude Code agent state / scratch / secrets
+.claude/
+.px13_ght
+*.tmp
