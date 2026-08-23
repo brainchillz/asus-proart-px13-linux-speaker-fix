@@ -21,13 +21,13 @@
 #    the rt721 jack codec) and falls back to a "Dummy Output" sink even
 #    after the firmware above loads correctly.
 #
-# 3. A local patch to rt721.conf (also bundled in ./ucm) that removes a
-#    "Headphone Switch" cset this codec/driver doesn't support. Without
-#    this, `alsaucm set _verb HiFi` fails outright (UCM's "disdevall" on
-#    verb activation chokes on the missing control), and PipeWire/ACP
-#    falls back to a generic "stereo-fallback" profile - producing
-#    speaker-test output with no audible sound, even with the firmware
-#    and Speaker UCM profile above both correctly installed.
+# 3. A per-card UCM override, GENERATED at install time from whichever
+#    sof-soundwire.conf is actually installed, that force-selects the
+#    tas2783 profile from (2). It is generated rather than shipped because
+#    a shipped copy is coupled to one alsa-ucm-conf generation and fails on
+#    others - see the long comment at the generation step below. The card
+#    long name is detected from /proc/asound/cards rather than hardcoded,
+#    since it differs per SKU (HN7306EA vs HN7306EAC vs ...).
 #
 # 4. A systemd oneshot service (./systemd/px13-audio-rebind.service +
 #    px13-audio-fix.sh) plus a systemd-sleep hook
@@ -64,7 +64,21 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CARD_LONGNAME="ASUSTeKCOMPUTERINC.-ProArtPX13HN7306EAC-1.0-HN7306EAC"
+UCM=/usr/share/alsa/ucm2
+
+# Detect the card instead of hardcoding it. The UCM long name embeds the
+# exact SKU and differs between machines (HN7306EA vs HN7306EAC vs ...).
+# A hardcoded name installs an override that simply never matches - the
+# speakers stay dead and nothing anywhere reports an error.
+CARD_NUM="$(awk -F'[][]' '/\]: amd-soundwire/ {gsub(/ /,"",$1); print $1; exit}' /proc/asound/cards)"
+if [ -z "$CARD_NUM" ]; then
+	echo "ERROR: no amd-soundwire card found in /proc/asound/cards." >&2
+	exit 1
+fi
+CARD_LONGNAME="$(awk -v n="$CARD_NUM" \
+	'{if ($1==n && /\]:/) {getline; gsub(/^[ \t]+|[ \t]+$/,""); print; exit}}' \
+	/proc/asound/cards)"
+echo "==> Detected card $CARD_NUM: $CARD_LONGNAME"
 
 # The TAS2783 calibration firmware is proprietary and is NOT shipped in this
 # public repo - you must extract it from ASUS's Windows driver first. See
@@ -84,12 +98,91 @@ sudo install -d -m 755 /lib/firmware/ti/audio/tas2783
 sudo install -m 644 "$SCRIPT_DIR/firmware/1714-1-8.bin" /lib/firmware/ti/audio/tas2783/1714-1-8.bin
 sudo install -m 644 "$SCRIPT_DIR/firmware/1714-1-B.bin" /lib/firmware/ti/audio/tas2783/1714-1-B.bin
 
-echo "==> Installing local ALSA UCM speaker profile for tas2783..."
-sudo install -m 644 "$SCRIPT_DIR/ucm/tas2783.conf" /usr/share/alsa/ucm2/sof-soundwire/tas2783.conf
-sudo install -m 644 "$SCRIPT_DIR/ucm/${CARD_LONGNAME}.conf" "/usr/share/alsa/ucm2/conf.d/amd-soundwire/${CARD_LONGNAME}.conf"
+echo "==> Checking the TAS2783 amp controls this profile drives..."
+for ctl in 'Left Spk Switch' 'Right Spk Switch' 'Left Spk2 Switch' 'Right Spk2 Switch'; do
+	if ! amixer -c "$CARD_NUM" cget "name=$ctl" >/dev/null 2>&1; then
+		echo "    WARNING: control '$ctl' not found on card $CARD_NUM."
+		echo "             ucm/tas2783.conf assumes two TAS2783 amps; a board"
+		echo "             with a different amp count needs its EnableSequence"
+		echo "             adjusted or verb activation will fail."
+	fi
+done
 
-echo "==> Patching rt721.conf (removes 'Headphone Switch' cset that this codec doesn't support)..."
-sudo install -m 644 "$SCRIPT_DIR/ucm/rt721.conf" /usr/share/alsa/ucm2/sof-soundwire/rt721.conf
+echo "==> Installing local ALSA UCM speaker profile for tas2783..."
+sudo install -m 644 "$SCRIPT_DIR/ucm/tas2783.conf" "$UCM/sof-soundwire/tas2783.conf"
+
+# Generate the card override from whatever sof-soundwire.conf is actually
+# installed, rather than shipping a copy of one.
+#
+# A shipped copy is version-coupled to the alsa-ucm-conf it was taken from,
+# and breaks in two separate ways on older trees:
+#
+#   * Syntax. Newer sof-soundwire.conf declares "Syntax 7", but the syntax
+#     ceiling is enforced by ALSA-LIB, not by alsa-ucm-conf. alsa-lib 1.2.11
+#     (Ubuntu 24.04 / Zorin 18) rejects anything above Syntax 6 outright:
+#     "parser.c:270 Incompatible syntax 7 ... -22". Upgrading alsa-ucm-conf
+#     does not help and actively makes things worse.
+#
+#   * Moved includes. Paths like /common/pcm/hdmi.conf do not exist in older
+#     trees, so the override fails to parse even once the syntax is accepted.
+#
+# Deriving the override from the installed file sidesteps both: it is always
+# syntax-correct and its includes always resolve for the tree it came from.
+echo "==> Generating card override for ${CARD_LONGNAME}..."
+OVERRIDE="$UCM/conf.d/amd-soundwire/${CARD_LONGNAME}.conf"
+if [ ! -f "$UCM/sof-soundwire/sof-soundwire.conf" ]; then
+	echo "ERROR: $UCM/sof-soundwire/sof-soundwire.conf missing." >&2
+	echo "       Is alsa-ucm-conf installed?" >&2
+	exit 1
+fi
+if [ -f "$OVERRIDE" ] && [ ! -f "$OVERRIDE.orig" ]; then
+	sudo cp -a "$OVERRIDE" "$OVERRIDE.orig"
+	echo "    backed up existing override to $(basename "$OVERRIDE").orig"
+fi
+
+TMP_OVERRIDE="$(mktemp)"
+trap 'rm -f "$TMP_OVERRIDE"' EXIT
+cat "$UCM/sof-soundwire/sof-soundwire.conf" > "$TMP_OVERRIDE"
+cat >> "$TMP_OVERRIDE" <<'UCMEOF'
+
+# --- Local addition: force the TAS2783 speaker device ---
+# alsa.components for this card is "cfg-amp:2 mic:acp-dmic cfg-mics:1
+# hs:rt721" - there is no " spk:<codec>" token, because the kernel's
+# snd_acp_sdw_legacy_mach machine driver does not emit one for tas2783.
+# SpeakerCodec1 therefore resolves to "" and the generic sof-soundwire
+# HiFi profile never adds a Speaker device, so PipeWire falls back to a
+# Dummy Output sink. Force-select the local tas2783.conf instead.
+#
+# BOTH variables must be set, because the two alsa-ucm-conf generations
+# gate the speaker include differently:
+#
+#   upstream 1.2.15.x   ->  If.spkdev tests ${var:SpeakerCodec1}
+#   Ubuntu 24.04 tree   ->  If.spk    tests ${var:SpeakerCodecFile}
+#
+# Setting only SpeakerCodec1 silently produces no Speaker device on
+# Ubuntu/Zorin. The unused one is a harmless no-op on either tree.
+#
+# Appended after the multi-codec If blocks above so that rt721 headset and
+# acp-dmic microphone handling is left completely untouched.
+Define {
+	SpeakerCodec1 "tas2783"
+	SpeakerCodecFile "tas2783"
+}
+UCMEOF
+sudo install -m 644 "$TMP_OVERRIDE" "$OVERRIDE"
+
+# Older revisions of this script shipped a patched rt721.conf that emptied
+# the 'Headphone Switch' cset. That patch was wrong on two counts: the
+# control does exist (numid=13 'Headphone Switch'), and the shipped file
+# referenced ${var:MultiMicShadow} / ${var:MultiSpeakerShadow}, which are
+# undefined on trees that use MicCodecFile / SpeakerCodecFile - breaking
+# the rt721 Mic and Speaker sections outright. Restore the stock file.
+if dpkg -V alsa-ucm-conf 2>/dev/null | grep -q 'sof-soundwire/rt721.conf'; then
+	echo "==> Restoring stock rt721.conf (previous versions patched it)..."
+	sudo apt-get install --reinstall -o Dpkg::Options::=--force-confmiss \
+		-y alsa-ucm-conf >/dev/null 2>&1 || \
+		echo "    could not reinstall alsa-ucm-conf; do it manually"
+fi
 
 echo "==> Installing ACP/SoundWire reset + PipeWire-refresh script..."
 sudo install -m 755 "$SCRIPT_DIR/systemd/px13-audio-fix.sh" /usr/local/sbin/px13-audio-fix.sh

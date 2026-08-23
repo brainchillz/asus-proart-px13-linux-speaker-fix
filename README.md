@@ -34,11 +34,12 @@ Output" sink).
    so the amp never initializes and playback fails.
 
 2. **No ALSA UCM "Speaker" profile for the TAS2783.** Upstream
-   `alsa-ucm-conf` has no `tas2783` codec profile, so PipeWire never exposes
-   the internal speaker. Additionally, `rt721.conf` references a
-   `Headphone Switch` control this codec/driver doesn't expose, which makes
-   `alsaucm set _verb HiFi` fail and drops PipeWire to a generic
-   "stereo-fallback" profile (silent even after the firmware loads).
+   `alsa-ucm-conf` has no `tas2783` codec profile. The kernel's
+   `snd_acp_sdw_legacy_mach` machine driver also emits no ` spk:<codec>`
+   token in `alsa.components` (this card reports
+   `cfg-amp:2 mic:acp-dmic cfg-mics:1 hs:rt721`), so the generic
+   `sof-soundwire` profile resolves `SpeakerCodec1` to `""`, never adds a
+   Speaker device, and PipeWire falls back to a "Dummy Output" sink.
 
 3. **The AMD ACP/SoundWire controller doesn't survive boot/suspend cleanly.**
    - Cold boot: TAS2783 firmware download intermittently fails with an SDW bus
@@ -54,8 +55,8 @@ Output" sink).
 | Component | Installed to | Purpose |
 |---|---|---|
 | Calibration firmware | `/lib/firmware/1714-1-{8,B}.bin` (+ `ti/audio/tas2783/`) | Lets the TAS2783 amps initialize |
-| UCM Speaker profile | `/usr/share/alsa/ucm2/sof-soundwire/tas2783.conf` + card override | Exposes the internal speaker to PipeWire |
-| `rt721.conf` patch | `/usr/share/alsa/ucm2/sof-soundwire/rt721.conf` | Removes the unsupported `Headphone Switch` cset so the `HiFi` verb activates |
+| UCM Speaker profile | `/usr/share/alsa/ucm2/sof-soundwire/tas2783.conf` | Adds a Speaker device on PCM 2 and unmutes both amps |
+| Card override | `/usr/share/alsa/ucm2/conf.d/amd-soundwire/<card-long-name>.conf` | Force-selects the tas2783 profile. **Generated** from the installed `sof-soundwire.conf`, not shipped — see below |
 | `px13-audio-fix.sh` | `/usr/local/sbin/` | Resets the ACP controller (PCI unbind/bind of `0000:c4:00.5`) and refreshes PipeWire |
 | `px13-audio-rebind.service` | `/etc/systemd/system/` | Runs the reset at **boot** (`After=sound.target`) |
 | `px13-audio-resume.service` | `/etc/systemd/system/` | Runs the reset after **resume** (ordered on the sleep targets, after thaw) |
@@ -101,10 +102,47 @@ speaker-test -D pipewire -c 2 -t sine -f 440
 A reboot and a suspend/resume cycle should both keep the speakers working with
 no manual intervention.
 
+### Why the card override is generated, not shipped
+
+Two things about the UCM layer are easy to get wrong, and both produce a
+silent failure with no error pointing at the cause:
+
+**The `Syntax` ceiling is enforced by alsa-lib, not alsa-ucm-conf.** Recent
+`sof-soundwire.conf` declares `Syntax 7`. alsa-lib 1.2.11 — what Ubuntu 24.04
+and Zorin 18 ship — refuses anything above `Syntax 6`:
+
+```
+ALSA lib parser.c:270:(parse_syntax_field) Incompatible syntax 7 in <card>.conf
+```
+
+Upgrading `alsa-ucm-conf` does **not** fix this and makes it worse: the newer
+tree's own `sof-soundwire.conf` is `Syntax 7`, so overlaying it renders the
+card unreadable. Ubuntu's `alsa-ucm-conf 1.2.10-1ubuntu5.14` is also not
+vanilla 1.2.10 — it is heavily backported (`Syntax 6`, `MultiCodecInit`,
+`rt1320`, and `acp-dmic.conf`, which upstream 1.2.15.2 does not ship at all
+and the internal mic needs).
+
+**The two alsa-ucm-conf generations gate the speaker include on different
+variables:**
+
+| Tree | `HiFi.conf` tests |
+|---|---|
+| upstream 1.2.15.x | `${var:SpeakerCodec1}` |
+| Ubuntu 24.04 backport | `${var:SpeakerCodecFile}` |
+
+Setting only `SpeakerCodec1` silently yields no Speaker device on
+Ubuntu/Zorin. The override therefore sets **both**; the unused one is a
+harmless no-op on either tree.
+
+Generating the override from the installed `sof-soundwire.conf` sidesteps
+both problems: it is always syntax-correct for the tree it came from, and its
+`Include` paths always resolve.
+
 ## Hardware details
 
 ASUS ProArt PX13 HN7306 · card long-name
-`ASUSTeKCOMPUTERINC.-ProArtPX13HN7306EAC-1.0-HN7306EAC` · rt721-sdca jack
+`ASUSTeKCOMPUTERINC.-ProArtPX13HN7306EA{,C}-1.0-HN7306EA{,C}` (varies by
+SKU; detected at runtime) · rt721-sdca jack
 codec + 2× TAS2783 SoundWire smart amps on SoundWire link 1 (slaves `01:8`,
 `01:b`) · AMD ACP PCI device `0000:c4:00.5` (driver `snd_pci_ps`) · PCI
 subsystem id `0x1714`.
