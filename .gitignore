@@ -6,3 +6,7 @@ firmware/*.bin
 .claude/
 .px13_ght
 *.tmp
+
+# Proprietary ASUS/TI Windows driver installer + extraction artifacts
+SmartAMP_TI_DCH_*.exe
+extracted_driver/

@@ -57,6 +57,15 @@
 #    PipeWire restart for frozen sessions and lets WirePlumber's udev
 #    monitor re-enumerate the recreated card on thaw.
 #
+# 5. A DKMS package (./driver) rebuilding the TAS2783 SoundWire codec
+#    module with the upstream-pending "stereo split and resume fixes"
+#    series. Without it both mono amps mirror the left channel (right
+#    speaker silent); the patched module adds a per-amp "RX Single
+#    Channel Switch" control which the UCM profile above turns on for
+#    both amps. Being DKMS, it rebuilds automatically for every new
+#    kernel and installs to /lib/modules/<k>/updates/dkms/, which
+#    depmod prefers over the in-tree module.
+#
 # Run this after a fresh OS install. Safe to re-run.
 #
 # See the README for full background/history.
@@ -84,7 +93,24 @@ sudo install -d -m 755 /lib/firmware/ti/audio/tas2783
 sudo install -m 644 "$SCRIPT_DIR/firmware/1714-1-8.bin" /lib/firmware/ti/audio/tas2783/1714-1-8.bin
 sudo install -m 644 "$SCRIPT_DIR/firmware/1714-1-B.bin" /lib/firmware/ti/audio/tas2783/1714-1-B.bin
 
+echo "==> Installing patched tas2783 codec module (stereo split) via DKMS..."
+DKMS_PKG="tas2783-stereo"
+DKMS_VER="1.0"
+command -v dkms >/dev/null 2>&1 || sudo apt-get install -y dkms
+sudo dkms remove "${DKMS_PKG}/${DKMS_VER}" --all >/dev/null 2>&1 || true
+sudo rm -rf "/usr/src/${DKMS_PKG}-${DKMS_VER}"
+sudo install -d -m 755 "/usr/src/${DKMS_PKG}-${DKMS_VER}"
+sudo install -m 644 "$SCRIPT_DIR/driver/dkms.conf" "$SCRIPT_DIR/driver/Makefile" \
+  "$SCRIPT_DIR/driver/tas2783-sdw.c" "$SCRIPT_DIR/driver/tas2783.h" \
+  "/usr/src/${DKMS_PKG}-${DKMS_VER}/"
+sudo dkms add "${DKMS_PKG}/${DKMS_VER}"
+sudo dkms build "${DKMS_PKG}/${DKMS_VER}"
+sudo dkms install "${DKMS_PKG}/${DKMS_VER}"
+echo "    module now resolves to: $(modinfo -n snd-soc-tas2783-sdw)"
+
 echo "==> Installing local ALSA UCM speaker profile for tas2783..."
+sudo install -d -m 755 /usr/share/alsa/ucm2/px13-soundwire
+sudo install -m 644 "$SCRIPT_DIR/ucm/px13-soundwire/HiFi.conf" /usr/share/alsa/ucm2/px13-soundwire/HiFi.conf
 sudo install -m 644 "$SCRIPT_DIR/ucm/tas2783.conf" /usr/share/alsa/ucm2/sof-soundwire/tas2783.conf
 sudo install -m 644 "$SCRIPT_DIR/ucm/${CARD_LONGNAME}.conf" "/usr/share/alsa/ucm2/conf.d/amd-soundwire/${CARD_LONGNAME}.conf"
 

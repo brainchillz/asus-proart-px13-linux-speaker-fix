@@ -24,8 +24,11 @@ Output" sink).
 - Speakers that work after a manual fix **break again after every
   suspend/resume** (and originally after every reboot) — on resume the whole
   `amd-soundwire` ALSA card disappears.
+- Once audible, **stereo is broken**: the right speaker is silent and the
+  left renders both channels (sounds "center"). Both mono amps mirror the
+  left channel.
 
-## Root causes (three separate problems)
+## Root causes (four separate problems)
 
 1. **Missing TAS2783 calibration firmware.** The speaker amps are TI TAS2783
    SoundWire smart amps needing per-laptop calibration blobs
@@ -47,6 +50,17 @@ Output" sink).
      ACP/SoundWire controller fails to re-initialize — dropping PipeWire back
      to "Dummy Output".
 
+4. **The in-tree TAS2783 driver mirrors one channel onto both amps.** On a
+   stereo stream `snd_sdw_params_to_config()` (`include/sound/sdw.h`) gives
+   every amp `ch_mask = GENMASK(ch_count-1,0)` = `0x3`, which the SoundWire
+   core treats as *mirror mode*: both amps get the same payload block offset
+   (`sdw_compute_slave_ports()` advances by the mask's popcount), so both
+   render the left channel and the right speaker stays silent. Fixed by an
+   out-of-tree build of the codec module carrying the upstream-pending
+   [stereo-split + resume-fix series](https://lore.kernel.org/lkml/20260809101541.4969-1-wiza@saarinenkoti.fi/)
+   (see [`driver/`](driver/)); it adds a per-amp `RX Single Channel Switch`
+   which the UCM profile turns on for both amps.
+
 ## What this repo installs
 
 `fix-px13-audio.sh` installs all of the following (safe to re-run):
@@ -54,7 +68,8 @@ Output" sink).
 | Component | Installed to | Purpose |
 |---|---|---|
 | Calibration firmware | `/lib/firmware/1714-1-{8,B}.bin` (+ `ti/audio/tas2783/`) | Lets the TAS2783 amps initialize |
-| UCM Speaker profile | `/usr/share/alsa/ucm2/sof-soundwire/tas2783.conf` + card override | Exposes the internal speaker to PipeWire |
+| Patched codec module (DKMS) | `/usr/src/tas2783-stereo-1.0/` → `/lib/modules/<k>/updates/dkms/` | Stereo split across the two amps + resume fixes; rebuilds automatically for new kernels |
+| UCM Speaker profile | `/usr/share/alsa/ucm2/sof-soundwire/tas2783.conf` + card override | Exposes the internal speaker to PipeWire and enables the per-amp `RX Single Channel Switch` (stereo split) |
 | `rt721.conf` patch | `/usr/share/alsa/ucm2/sof-soundwire/rt721.conf` | Removes the unsupported `Headphone Switch` cset so the `HiFi` verb activates |
 | `px13-audio-fix.sh` | `/usr/local/sbin/` | Resets the ACP controller (PCI unbind/bind of `0000:c4:00.5`) and refreshes PipeWire |
 | `px13-audio-rebind.service` | `/etc/systemd/system/` | Runs the reset at **boot** (`After=sound.target`) |
@@ -118,6 +133,12 @@ subsystem id `0x1714`.
   `cfg-amp:N` → implicit speaker fallback.
 - The AMD ACP/SoundWire s2idle resume failure (whole card disappears) is a
   kernel bug worth reporting to the ALSA/SOF maintainers.
+- The stereo-split fix is already posted upstream
+  ([lore](https://lore.kernel.org/lkml/20260809101541.4969-1-wiza@saarinenkoti.fi/))
+  but not yet merged (as of kernel 7.0.0-38). Once it lands in Ubuntu's
+  kernel, drop the DKMS block from `fix-px13-audio.sh` and the `driver/`
+  directory; the UCM `If.ControlExists` guards make the profile harmless
+  either way.
 
 ## Licensing note
 
