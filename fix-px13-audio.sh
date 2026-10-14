@@ -21,13 +21,22 @@
 #    the rt721 jack codec) and falls back to a "Dummy Output" sink even
 #    after the firmware above loads correctly.
 #
-# 3. A local patch to rt721.conf (also bundled in ./ucm) that removes a
-#    "Headphone Switch" cset this codec/driver doesn't support. Without
-#    this, `alsaucm set _verb HiFi` fails outright (UCM's "disdevall" on
-#    verb activation chokes on the missing control), and PipeWire/ACP
-#    falls back to a generic "stereo-fallback" profile - producing
-#    speaker-test output with no audible sound, even with the firmware
-#    and Speaker UCM profile above both correctly installed.
+# 3. A fully SELF-CONTAINED UCM use case: ./ucm/px13-soundwire/ bundles
+#    its own copies of the codec device files (rt721 headset, acp-dmic,
+#    tas2783 speaker) instead of including the distro sof-soundwire/
+#    ones, and the card override ./ucm/<card-longname>.conf points UCM
+#    at it. Two reasons:
+#      - the distro HiFi.conf auto-detects codecs from "spk:<codec>"
+#        tokens this machine's legacy AMD machine driver never publishes,
+#        so it exposes no Speaker device at all;
+#      - the distro rt721.conf references a "Headphone Switch" cset this
+#        codec doesn't support (verb activation fails outright, dropping
+#        PipeWire to a silent fallback profile), and alsa-ucm-conf
+#        updates have repeatedly broken that file's variable guards
+#        (MultiMicShadow -> MicCodec1 rename in 1.2.15.3-1ubuntu1.7).
+#    Bundling our own copies makes the speakers immune to alsa-ucm-conf
+#    package upgrades - earlier revisions patched the distro file and
+#    were broken by every update.
 #
 # 4. A systemd oneshot service (./systemd/px13-audio-rebind.service +
 #    px13-audio-fix.sh) plus a systemd-sleep hook
@@ -108,14 +117,11 @@ sudo dkms build "${DKMS_PKG}/${DKMS_VER}"
 sudo dkms install "${DKMS_PKG}/${DKMS_VER}"
 echo "    module now resolves to: $(modinfo -n snd-soc-tas2783-sdw)"
 
-echo "==> Installing local ALSA UCM speaker profile for tas2783..."
+echo "==> Installing self-contained ALSA UCM use case (immune to alsa-ucm-conf upgrades)..."
 sudo install -d -m 755 /usr/share/alsa/ucm2/px13-soundwire
-sudo install -m 644 "$SCRIPT_DIR/ucm/px13-soundwire/HiFi.conf" /usr/share/alsa/ucm2/px13-soundwire/HiFi.conf
-sudo install -m 644 "$SCRIPT_DIR/ucm/tas2783.conf" /usr/share/alsa/ucm2/sof-soundwire/tas2783.conf
+sudo install -m 644 "$SCRIPT_DIR/ucm/px13-soundwire/"*.conf /usr/share/alsa/ucm2/px13-soundwire/
+sudo install -d -m 755 /usr/share/alsa/ucm2/conf.d/amd-soundwire
 sudo install -m 644 "$SCRIPT_DIR/ucm/${CARD_LONGNAME}.conf" "/usr/share/alsa/ucm2/conf.d/amd-soundwire/${CARD_LONGNAME}.conf"
-
-echo "==> Patching rt721.conf (removes 'Headphone Switch' cset that this codec doesn't support)..."
-sudo install -m 644 "$SCRIPT_DIR/ucm/rt721.conf" /usr/share/alsa/ucm2/sof-soundwire/rt721.conf
 
 echo "==> Installing ACP/SoundWire reset + PipeWire-refresh script..."
 sudo install -m 755 "$SCRIPT_DIR/systemd/px13-audio-fix.sh" /usr/local/sbin/px13-audio-fix.sh
@@ -146,7 +152,7 @@ echo
 echo "==> Done. Verify with:"
 echo "    journalctl -k -b 0 | grep -i tas2783   (should show no firmware load errors)"
 echo "    wpctl status                          (should show 'Audio Coprocessor Speaker')"
-echo "    speaker-test -D pipewire -c 2 -t sine -f 440"
+echo "    ./test-stereo.sh                      (voice test: 'left'/'right' from each speaker)"
 echo
 echo "A reboot (and a suspend/resume cycle) is recommended to confirm"
 echo "everything persists cleanly - px13-audio-rebind.service runs at boot"

@@ -69,8 +69,7 @@ Output" sink).
 |---|---|---|
 | Calibration firmware | `/lib/firmware/1714-1-{8,B}.bin` (+ `ti/audio/tas2783/`) | Lets the TAS2783 amps initialize |
 | Patched codec module (DKMS) | `/usr/src/tas2783-stereo-1.0/` → `/lib/modules/<k>/updates/dkms/` | Stereo split across the two amps + resume fixes; rebuilds automatically for new kernels |
-| UCM Speaker profile | `/usr/share/alsa/ucm2/sof-soundwire/tas2783.conf` + card override | Exposes the internal speaker to PipeWire and enables the per-amp `RX Single Channel Switch` (stereo split) |
-| `rt721.conf` patch | `/usr/share/alsa/ucm2/sof-soundwire/rt721.conf` | Removes the unsupported `Headphone Switch` cset so the `HiFi` verb activates |
+| UCM use case (self-contained) | `/usr/share/alsa/ucm2/px13-soundwire/` + card override in `conf.d/amd-soundwire/` | Exposes the internal Speaker (enabling the per-amp `RX Single Channel Switch` for the stereo split), Headphones and Mics; bundles its own copies of the codec device files, so `alsa-ucm-conf` upgrades cannot break it |
 | `px13-audio-fix.sh` | `/usr/local/sbin/` | Resets the ACP controller (PCI unbind/bind of `0000:c4:00.5`) and refreshes PipeWire |
 | `px13-audio-rebind.service` | `/etc/systemd/system/` | Runs the reset at **boot** (`After=sound.target`) |
 | `px13-audio-resume.service` | `/etc/systemd/system/` | Runs the reset after **resume** (ordered on the sleep targets, after thaw) |
@@ -110,11 +109,41 @@ Verify:
 ```bash
 journalctl -k -b 0 | grep -i tas2783      # no "firmware load ... failed"
 wpctl status                              # shows "Audio Coprocessor Speaker"
-speaker-test -D pipewire -c 2 -t sine -f 440
+./test-stereo.sh                          # "left"/"right" voice, each from its own speaker
 ```
+
+`test-stereo.sh` plays GNOME's speaker-test voice samples hard-panned to
+each speaker (left, right, left, right). If both words come from the same
+speaker, the stereo split (root cause 4) is not active.
 
 A reboot and a suspend/resume cycle should both keep the speakers working with
 no manual intervention.
+
+## Tested versions
+
+| Component | Tested with |
+|---|---|
+| OS | Ubuntu 26.04 "resolute" |
+| Kernel | `7.0.0-34-generic`, `7.0.0-38-generic` |
+| alsa-ucm-conf | `1.2.15.3-1ubuntu1.5`, `1.2.15.3-1ubuntu1.7` |
+| PipeWire / WirePlumber | `1.6.2-1ubuntu1.2` / `0.5.13-1ubuntu1` |
+
+How the fix holds up across updates:
+
+- **Kernel updates** are handled by DKMS: the patched codec module
+  rebuilds and installs itself for every new kernel. Its source is the
+  7.0.0 `tas2783-sdw.c` snapshot plus the upstream-pending series. If a
+  future kernel changes the codec's internal APIs the DKMS *build* fails —
+  loudly but harmlessly: the in-tree module stays in use and the speakers
+  keep working in mirror mono. Refresh `driver/` from the new kernel
+  source when that happens (or drop it once the series is merged).
+- **alsa-ucm-conf updates** can no longer break the use case: the verb is
+  fully self-contained and no distro-owned UCM file is patched anymore.
+  (Earlier revisions patched `sof-soundwire/rt721.conf` and were broken
+  twice by package upgrades — a `Headphone Switch` cset regression and a
+  guard-variable rename.)
+- **PipeWire/WirePlumber**: nothing version-specific; any recent release
+  with standard UCM support works.
 
 ## Hardware details
 
