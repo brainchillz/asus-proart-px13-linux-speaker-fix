@@ -70,6 +70,55 @@ grep -q "$CARD_MATCH" /proc/asound/cards 2>/dev/null \
 # Let the tas2783 firmware download / amp init settle before touching PipeWire.
 sleep 2
 
+# --- Verify both tas2783 amps actually got their firmware --------------------
+# The amps download their calibration firmware asynchronously when they
+# attach to the SoundWire bus, and at boot one of them (usually the right
+# channel, sdw ...:01:8) intermittently misses the attach - the driver then
+# fails every playback hw_params with "error playback without fw download"
+# and that speaker stays silent even though the card exists.
+#
+# Detect it by forcing a hw_params on the SmartAmp PCM with a whisper of
+# silence: if either amp lacks firmware the open fails with EINVAL. (If the
+# device is busy, PipeWire already has it open and streaming - amps OK.)
+# On failure, re-bind the SoundWire slaves so the driver re-runs its
+# attach/firmware-download path, and re-check.
+SDW_DRV="/sys/bus/soundwire/drivers/slave-tas2783"
+
+amps_ok() {
+  local out
+  out=$(head -c 9600 /dev/zero | timeout 5 aplay -D hw:1,2 -q \
+        -f S16_LE -c 2 -r 48000 -t raw - 2>&1) && return 0
+  echo "$out" | grep -qi busy && return 0
+  return 1
+}
+
+sdw_rebind_slaves() {
+  local dev
+  for dev in /sys/bus/soundwire/devices/sdw:0:1:0102:0000:01:*; do
+    timeout 30 sh -c "echo '$(basename "$dev")' > '$SDW_DRV/unbind'" 2>/dev/null
+  done
+  sleep 1
+  for dev in /sys/bus/soundwire/devices/sdw:0:1:0102:0000:01:*; do
+    timeout 30 sh -c "echo '$(basename "$dev")' > '$SDW_DRV/bind'" 2>/dev/null
+  done
+  sleep 3
+}
+
+if [ -d "$SDW_DRV" ]; then
+  for attempt in 1 2 3; do
+    if amps_ok; then
+      log "both tas2783 amps report firmware loaded"
+      break
+    fi
+    if [ "$attempt" = 3 ]; then
+      log "WARNING: tas2783 firmware still missing after $attempt attempts"
+      break
+    fi
+    log "tas2783 firmware check failed (attempt $attempt) - re-binding SoundWire amps"
+    sdw_rebind_slaves
+  done
+fi
+
 # --- Refresh PipeWire/WirePlumber for each logged-in user --------------------
 # Restart it so it cleanly re-enumerates the recreated card.
 #

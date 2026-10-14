@@ -1,0 +1,76 @@
+The firmware image is downloaded with sdw_nwrite_no_pm(), which writes
+straight to the peripheral and bypasses the regmap cache. The cache keeps
+holding the tas2783_reg_default[] entries for every register the firmware
+image owns, so cache and device disagree from the moment the download
+completes.
+
+tas2783_sdca_dev_resume() then does regcache_cache_only(false) followed by
+regcache_sync(), and regcache_sync() writes out every cached register. On
+a system resume the peripheral stays attached and keeps its device state,
+so hw_init is still set and the firmware is never re-downloaded - but the
+sync stamps the stale defaults back onto the device on top of the firmware
+tuning that is still live there.
+
+On an HP OmniBook X Flip 14, which carries two aggregated TAS2783 amps,
+this was measured with a cache-bypassing debugfs read taken after an
+s2idle cycle: all 12 registers where the firmware image differs from the
+defaults table had reverted to their default value on both amps, and the
+two amps had become byte-identical over 0x800001-0x800040. Among the lost
+values are the four page-0 bytes that give each amp of a stereo pair its
+own configuration. The speakers are silent after resume and stay silent
+until the machine is rebooted.
+
+Drop each downloaded file's destination range from the cache once it has
+been written, so the cache no longer claims to know registers the firmware
+owns and regcache_sync() has nothing stale to write over them. This is
+safe: a suspend deep enough for the peripheral to actually lose its state
+also takes it UNATTACHED, which clears hw_init and triggers a full
+firmware re-download on re-attach.
+
+Developed with AI assistance. The assistant diagnosed the interaction
+between the cache-bypassing firmware download and the resume-time
+regcache_sync(), and drafted the patch.
+
+All hardware measurements quoted above were run by the submitter on the
+affected machine. The submitter has reviewed the change, understands it
+and takes responsibility for it.
+
+Assisted-by: Claude:claude-opus-5
+Signed-off-by: Ville Saarinen <wiza@saarinenkoti.fi>
+---
+ sound/soc/codecs/tas2783-sdw.c | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/sound/soc/codecs/tas2783-sdw.c b/sound/soc/codecs/tas2783-sdw.c
+index d1addd8ae..f79e730b0 100644
+--- a/sound/soc/codecs/tas2783-sdw.c
++++ b/sound/soc/codecs/tas2783-sdw.c
+@@ -912,6 +912,26 @@ static void tas2783_fw_ready(const struct firmware *fmw, void *context)
+ 				"FW download failed: %d", ret);
+ 			break;
+ 		}
++
++		/*
++		 * The firmware image is written with sdw_nwrite_no_pm(), which
++		 * bypasses the regmap cache. The cache therefore keeps holding
++		 * the stale reg_defaults entries for every register the
++		 * firmware owns, and the regcache_sync() done on resume writes
++		 * those defaults back out over the firmware tuning. That wipes
++		 * the per-amp configuration, including the channel assignment,
++		 * and leaves the speakers silent until the next full re-init.
++		 *
++		 * Drop the firmware-owned registers from the cache so nothing
++		 * stale can ever be synced over them. This is safe because a
++		 * suspend deep enough to lose device state also takes the
++		 * peripheral UNATTACHED, which clears hw_init and triggers a
++		 * full firmware re-download on re-attach.
++		 */
++		if (file->length)
++			regcache_drop_region(tas_dev->regmap, file->dest_addr,
++					     file->dest_addr + file->length - 1);
++
+ 		cur_file++;
+ 	}
+ 	mutex_unlock(&tas_dev->pde_lock);
+-- 
+2.55.0
